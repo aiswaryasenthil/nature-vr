@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nature Immersion</title>
+<script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+<script src="experiences.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; background: #0c1f1c; }
+</style>
+</head>
+<body>
+
+<a-scene id="scene" background="color: #0c1f1c" renderer="antialias: true" loading-screen="enabled: false">
+
+  <!-- The 360 photo/video is shown on this big sphere around the viewer -->
+  <a-sky id="sky" radius="50" visible="false" color="#0c1f1c"></a-sky>
+
+  <!-- Viewer (camera) -->
+  <a-entity id="rig">
+    <a-entity id="cam" camera look-controls position="0 1.6 0">
+      <!-- invisible black ball used for smooth fades to black -->
+      <a-sphere id="fade" radius="0.4" segments-width="12" segments-height="8"
+                visible="false"
+                material="color: #000000; side: back; shader: flat; transparent: true; opacity: 0; depthTest: false; depthWrite: false"></a-sphere>
+    </a-entity>
+    <!-- Quest controllers (and hand tracking) -->
+    <a-entity laser-controls="hand: left"  raycaster="objects: .clickable; far: 100"></a-entity>
+    <a-entity laser-controls="hand: right" raycaster="objects: .clickable; far: 100"></a-entity>
+  </a-entity>
+
+  <!-- Mouse on a laptop; pinch / tap inside the headset -->
+  <a-entity cursor="rayOrigin: mouse; fuse: false" raycaster="objects: .clickable; far: 100"></a-entity>
+  <a-entity cursor="rayOrigin: xrselect; fuse: false" raycaster="objects: .clickable; far: 100"></a-entity>
+
+  <!-- All menus are built into this entity by the script below -->
+  <a-entity id="ui"></a-entity>
+  <a-entity id="controls"></a-entity>
+</a-scene>
+
+<script>
+/* ==========================================================================
+   Nature Immersion - app logic
+   Sections: 1) look & feel   2) building blocks   3) screens   4) playing   5) start
+   ========================================================================== */
+
+const EXPERIENCES = window.EXPERIENCES || [];
+const CONFIG = window.APP_CONFIG || {};
+
+/* ---------- 1) LOOK & FEEL: change colors and sizes here ---------- */
+const THEMES = {
+  normal: {
+    panel: "#12302b",      // deep spruce panel behind the words
+    text: "#f1f5ee",       // mist white
+    muted: "#c3d3c8",
+    button: "#bcdc8c",     // sunlit moss
+    buttonText: "#10231f",
+    buttonHover: "#d8f0b4",
+    secondary: "#2f5650",
+    secondaryText: "#f1f5ee",
+    secondaryHover: "#41736a"
+  },
+  contrast: {
+    panel: "#000000",
+    text: "#ffffff",
+    muted: "#ffffff",
+    button: "#ffe14d",
+    buttonText: "#000000",
+    buttonHover: "#fff1a0",
+    secondary: "#ffffff",
+    secondaryText: "#000000",
+    secondaryHover: "#dddddd"
+  }
+};
+const TEXT_SIZES = [
+  { label: "Normal", scale: 1 },
+  { label: "Large", scale: 1.2 },
+  { label: "Extra large", scale: 1.4 }
+];
+const PANEL_W = 4.0, PANEL_H = 2.6;     // size of the menu panel (meters)
+const MENU_DISTANCE = 2.2;               // how far in front of you menus appear
+
+const settings = { sizeIndex: 0, highContrast: false, readAloud: false };
+const theme = () => settings.highContrast ? THEMES.contrast : THEMES.normal;
+const scale = () => TEXT_SIZES[settings.sizeIndex].scale;
+
+/* ---------- 2) BUILDING BLOCKS ---------- */
+const sceneEl = document.getElementById("scene");
+const uiEl = document.getElementById("ui");
+const controlsEl = document.getElementById("controls");
+const skyEl = document.getElementById("sky");
+const camEl = document.getElementById("cam");
+const fadeEl = document.getElementById("fade");
+
+// create an A-Frame element and attach it
+function mk(tag, attrs, parent) {
+  const el = document.createElement(tag);
+  for (const key in attrs) el.setAttribute(key, attrs[key]);
+  if (parent) parent.appendChild(el);
+  return el;
+}
+
+// ignore accidental double-presses (controllers can fire two events at once)
+let lastPress = 0;
+function pressAllowed() {
+  const now = performance.now();
+  if (now - lastPress < 450) return false;
+  lastPress = now;
+  return true;
+}
+
+function addText(parent, value, o) {
+  o = o || {};
+  return mk("a-entity", {
+    position: (o.x || 0) + " " + (o.y || 0) + " 0.02",
+    text: {
+      value: value,
+      align: o.align || "center",
+      anchor: "center",
+      baseline: o.baseline || "center",
+      color: o.color || theme().text,
+      width: o.width || 3.3,
+      wrapCount: Math.round((o.wrap || 34) / (o.noScale ? 1 : scale()))
+    }
+  }, parent);
+}
+
+function addButton(parent, label, o) {
+  const t = theme();
+  const w = o.w || 1.6, h = o.h || 0.46;
+  const bg = o.secondary ? t.secondary : t.button;
+  const hover = o.secondary ? t.secondaryHover : t.buttonHover;
+  const fg = o.secondary ? t.secondaryText : t.buttonText;
+  const btn = mk("a-plane", {
+    class: "clickable",
+    position: (o.x || 0) + " " + (o.y || 0) + " 0.04",
+    width: w, height: h,
+    material: { color: bg, shader: "flat" }
+  }, parent);
+  mk("a-entity", {
+    position: "0 0 0.01",
+    text: {
+      value: label, align: "center", anchor: "center", baseline: "center",
+      color: fg, width: w * 0.9,
+      wrapCount: Math.round((o.wrap || 18) / Math.min(scale(), 1.25))
+    }
+  }, btn);
+  btn.addEventListener("mouseenter", () => btn.setAttribute("material", "color", hover));
+  btn.addEventListener("mouseleave", () => btn.setAttribute("material", "color", bg));
+  btn.addEventListener("click", () => { if (pressAllowed()) o.onClick(); });
+  return btn;
+}
+
+// a panel with a title; returns the panel so screens can add things to it
+function addPanel(opts) {
+  opts = opts || {};
+  const panel = mk("a-plane", {
+    width: PANEL_W, height: PANEL_H,
+    material: { color: theme().panel, shader: "flat", opacity: 0.96, transparent: true }
+  }, uiEl);
+  if (opts.tapAnywhere) {
+    panel.classList.add("clickable");
+    panel.addEventListener("click", () => { if (pressAllowed()) opts.tapAnywhere(); });
+  }
+  return panel;
+}
+
+// put an entity in front of where the person is currently looking (level, not tilted)
+function placeInFront(el, distance, dropY) {
+  const cam = camEl.object3D;
+  const pos = new THREE.Vector3();
+  const quat = new THREE.Quaternion();
+  const dir = new THREE.Vector3(0, 0, -1);   // the camera looks down its own -Z axis
+  cam.getWorldPosition(pos);
+  cam.getWorldQuaternion(quat);
+  dir.applyQuaternion(quat);
+  dir.y = 0;
+  if (dir.lengthSq() < 0.0001) dir.set(0, 0, -1);
+  dir.normalize();
+  el.object3D.position.set(pos.x + dir.x * distance, pos.y + (dropY || 0), pos.z + dir.z * distance);
+  el.object3D.rotation.set(0, Math.atan2(-dir.x, -dir.z), 0);
+}
+
+function speak(text) {
+  try {
+    if (!("speechSynthesis" in window)) return;
+    window.speechSynthesis.cancel();
+    if (!settings.readAloud || !text) return;
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 0.85;
+    window.speechSynthesis.speak(u);
+  } catch (e) { /* narration is optional */ }
+}
+
+function fadeTo(opacity, ms) {
+  fadeEl.setAttribute("visible", true);
+  fadeEl.setAttribute("animation__fade", {
+    property: "material.opacity", to: opacity, dur: ms, easing: "easeInOutQuad"
+  });
+  return new Promise(res => setTimeout(() => {
+    if (opacity === 0) fadeEl.setAttribute("visible", false);
+    res();
+  }, ms + 60));
+}
+
+/* ---------- 3) SCREENS ---------- */
+let current = { screen: "welcome", index: 0, exp: null, practiced: false };
+
+function clearUI() {
+  while (uiEl.firstChild) uiEl.removeChild(uiEl.firstChild);
+}
+
+function show(screen, extra) {
+  Object.assign(current, extra || {}, { screen: screen });
+  clearUI();
+  hideControls();
+  const build = SCREENS[screen];
+  build();
+  placeInFront(uiEl, MENU_DISTANCE, 0);
+}
+
+const SCREENS = {
+
+  /* Welcome + comfort settings */
+  welcome() {
+    const p = addPanel();
+    addText(p, CONFIG.appTitle || "Welcome", { y: 0.88, wrap: 24, width: 3.5 });
+    addText(p, CONFIG.welcomeLine || "", { y: 0.38, wrap: 40, width: 3.2, color: theme().muted });
+    const row = -0.15;
+    addButton(p, "Text size: " + TEXT_SIZES[settings.sizeIndex].label, {
+      x: -1.25, y: row, w: 1.2, h: 0.5, secondary: true, wrap: 12,
+      onClick: () => { settings.sizeIndex = (settings.sizeIndex + 1) % TEXT_SIZES.length; show("welcome"); }
+    });
+    addButton(p, "High contrast: " + (settings.highContrast ? "On" : "Off"), {
+      x: 0, y: row, w: 1.2, h: 0.5, secondary: true, wrap: 12,
+      onClick: () => { settings.highContrast = !settings.highContrast; show("welcome"); }
+    });
+    addButton(p, "Read aloud: " + (settings.readAloud ? "On" : "Off"), {
+      x: 1.25, y: row, w: 1.2, h: 0.5, secondary: true, wrap: 12,
+      onClick: () => { settings.readAloud = !settings.readAloud; show("welcome"); }
+    });
+    addButton(p, "Start", { y: -0.95, w: 2.0, h: 0.55, wrap: 12, onClick: () => show("select") });
+    speak((CONFIG.appTitle || "") + ". " + (CONFIG.welcomeLine || "") + " Select Start when you are ready.");
+  },
+
+  /* Carousel: one experience at a time, big Previous / Next */
+  select() {
+    const p = addPanel();
+    const n = EXPERIENCES.length;
+    if (!n) {
+      addText(p, "No experiences have been added yet.", { y: 0.2, wrap: 30 });
+      return;
+    }
+    const exp = EXPERIENCES[current.index];
+    addText(p, "Please select your experience", { y: 1.05, wrap: 40, width: 3.3, color: theme().muted });
+
+    // picture (tap it to choose)
+    const thumb = mk("a-plane", {
+      class: "clickable", position: "0 0.35 0.04", width: 1.6, height: 0.9,
+      material: { color: "#2f5650", shader: "flat" }
+    }, p);
+    if (exp.thumbnail) thumb.setAttribute("material", { src: exp.thumbnail, color: "#ffffff", shader: "flat" });
+    thumb.addEventListener("click", () => { if (pressAllowed()) show("info", { exp: exp }); });
+
+    addButton(p, "Previous", {
+      x: -1.45, y: 0.35, w: 0.9, h: 0.9, secondary: true, wrap: 9,
+      onClick: () => { current.index = (current.index - 1 + n) % n; show("select"); }
+    });
+    addButton(p, "Next", {
+      x: 1.45, y: 0.35, w: 0.9, h: 0.9, secondary: true, wrap: 9,
+      onClick: () => { current.index = (current.index + 1) % n; show("select"); }
+    });
+    addText(p, exp.title, { y: -0.3, wrap: 26, width: 3.4 });
+    addText(p, (current.index + 1) + " of " + n, { y: -0.62, wrap: 50, color: theme().muted, noScale: true });
+    addButton(p, "Choose this experience", { y: -1.02, w: 2.8, h: 0.46, wrap: 24,
+      onClick: () => show("info", { exp: exp }) });
+    speak("Please select your experience. " + exp.title + ". " + (current.index + 1) + " of " + n);
+  },
+
+  /* Title + description, tap anywhere to continue */
+  info() {
+    const exp = current.exp;
+    const p = addPanel({ tapAnywhere: () => show("safety") });
+    addText(p, exp.title, { y: 0.75, wrap: 22, width: 3.5 });
+    addText(p, exp.description || "", { y: 0.05, wrap: 38, width: 3.2 });
+    addText(p, "Tap anywhere to continue", { y: -0.75, wrap: 36, color: theme().muted });
+    addButton(p, "Back to menu", { x: -1.45, y: -1.0, w: 1.0, h: 0.38, secondary: true, wrap: 14,
+      onClick: () => show("select") });
+    speak(exp.title + ". " + (exp.description || "") + " Tap anywhere to continue.");
+  },
+
+  /* Safety check */
+  safety() {
+    const exp = current.exp;
+    const p = addPanel();
+    addText(p, CONFIG.safetyIntro || "", { y: 0.98, wrap: 44, width: 3.5 });
+    let list = (CONFIG.safetyConditions || []).map(c => "\u2022 " + c).join("\n");
+    if (exp.safetyNote) list += "\n\n" + exp.safetyNote;
+    addText(p, list, { y: 0.25, wrap: 46, width: 3.3, align: "left" });
+    addText(p, CONFIG.safetyQuestion || "", { y: -0.58, wrap: 40 });
+    addButton(p, "No, continue", { x: -1.0, y: -1.0, w: 1.8, h: 0.5, wrap: 14, onClick: () => show("firsttime") });
+    addButton(p, "Yes, go back", { x: 1.0, y: -1.0, w: 1.8, h: 0.5, secondary: true, wrap: 14, onClick: () => show("select") });
+    speak((CONFIG.safetyIntro || "") + " " + (CONFIG.safetyConditions || []).join(". ") + ". " + (CONFIG.safetyQuestion || ""));
+  },
+
+  /* First time? */
+  firsttime() {
+    const p = addPanel();
+    addText(p, "Is this your first time trying this experience?", { y: 0.5, wrap: 26, width: 3.4 });
+    addButton(p, "Yes", { x: -1.0, y: -0.5, w: 1.6, h: 0.65, wrap: 8,
+      onClick: () => show("tutorial", { practiced: false }) });
+    addButton(p, "No", { x: 1.0, y: -0.5, w: 1.6, h: 0.65, secondary: true, wrap: 8,
+      onClick: () => startExperience(current.exp) });
+    speak("Is this your first time trying this experience?");
+  },
+
+  /* Quick practice with the selecting action */
+  tutorial() {
+    const p = addPanel();
+    addText(p, "Quick practice", { y: 0.95, wrap: 24, width: 3.5 });
+    if (!current.practiced) {
+      addText(p, "To choose something, point at it and press the trigger, or pinch your fingers. Try it now.", { y: 0.3, wrap: 40, width: 3.2 });
+      addButton(p, "Try me", { y: -0.55, w: 1.8, h: 0.6, wrap: 10,
+        onClick: () => { current.practiced = true; show("tutorial"); } });
+      addButton(p, "Skip practice", { y: -1.08, w: 1.4, h: 0.38, secondary: true, wrap: 14,
+        onClick: () => startExperience(current.exp) });
+      speak("To choose something, point at it and press the trigger, or pinch your fingers. Try it now.");
+    } else {
+      addText(p, "Wonderful, that is all you need. Whenever you want, tap the scene to pause or finish.", { y: 0.3, wrap: 40, width: 3.2 });
+      addButton(p, "Begin experience", { y: -0.7, w: 2.4, h: 0.6, wrap: 20,
+        onClick: () => startExperience(current.exp) });
+      speak("Wonderful, that is all you need. Whenever you want, tap the scene to pause or finish.");
+    }
+  },
+
+  /* Exit screen */
+  exit() {
+    const p = addPanel();
+    addText(p, "Your experience has ended!", { y: 0.95, wrap: 26, width: 3.5 });
+    addButton(p, "Exit the app", { y: 0.3, w: 3.2, h: 0.5, wrap: 28, onClick: exitApp });
+    addButton(p, "Return to experience selection", { y: -0.35, w: 3.2, h: 0.5, secondary: true, wrap: 30,
+      onClick: () => show("select") });
+    addButton(p, "Experience this again", { y: -1.0, w: 3.2, h: 0.5, secondary: true, wrap: 28,
+      onClick: () => startExperience(current.exp) });
+    speak("Your experience has ended. You can exit the app, return to the experience selection, or experience this again.");
+  },
+
+  goodbye() {
+    const p = addPanel();
+    addText(p, CONFIG.goodbye || "Thank you for visiting.", { y: 0.1, wrap: 30, width: 3.4 });
+    addButton(p, "Back to start", { y: -0.8, w: 1.8, h: 0.5, secondary: true, wrap: 14, onClick: () => show("welcome") });
+    speak(CONFIG.goodbye || "");
+  }
+};
+
+function exitApp() {
+  // Later, the installed Quest app can supply its own close function .
+  if (window.NatureVRNative && typeof window.NatureVRNative.exit === "function") {
+    window.NatureVRNative.exit();
+    return;
+  }
+  show("goodbye");
+  setTimeout(() => { try { sceneEl.exitVR(); } catch (e) {} }, 4000);
+}
+
+/* ---------- 4) PLAYING AN EXPERIENCE ---------- */
+let play = { active: false, paused: false, elapsed: 0, timer: null, video: null, audio: null, hideTimer: null };
+
+async function startExperience(exp) {
+  current.exp = exp;
+  speak("");
+  await fadeTo(1, 700);
+  clearUI();
+  hideControls();
+
+  play.active = true; play.paused = false; play.elapsed = 0;
+  skyEl.setAttribute("visible", true);
+  skyEl.classList.add("clickable");
+
+  if (exp.type === "video") {
+    const v = document.createElement("video");
+    v.id = "expVideo";
+    v.setAttribute("crossorigin", "anonymous");
+    v.setAttribute("playsinline", "");
+    v.setAttribute("webkit-playsinline", "");
+    v.preload = "auto";
+    v.src = exp.src;
+    v.style.display = "none";
+    document.body.appendChild(v);
+    play.video = v;
+    v.addEventListener("ended", finishExperience);
+    skyEl.setAttribute("material", "src", "#expVideo");
+    try { await v.play(); } catch (e) { console.warn("Video could not start:", e); }
+  } else {
+    skyEl.setAttribute("material", "src", exp.src);
+    if (exp.audio) {
+      play.audio = new Audio(exp.audio);
+      play.audio.loop = true;
+      play.audio.play().catch(() => {});
+    }
+    const total = exp.duration || 90;
+    play.timer = setInterval(() => {
+      if (!play.paused) {
+        play.elapsed += 0.5;
+        if (play.elapsed >= total) finishExperience();
+      }
+    }, 500);
+  }
+  await fadeTo(0, 900);
+}
+
+function stopMedia() {
+  if (play.timer) { clearInterval(play.timer); play.timer = null; }
+  if (play.video) { play.video.pause(); play.video.remove(); play.video = null; }
+  if (play.audio) { play.audio.pause(); play.audio = null; }
+}
+
+async function finishExperience() {
+  if (!play.active) return;
+  play.active = false;
+  hideControls();
+  await fadeTo(1, 800);
+  stopMedia();
+  skyEl.classList.remove("clickable");
+  skyEl.setAttribute("visible", false);
+  show("exit");
+  await fadeTo(0, 800);
+}
+
+/* Tap the scene to show Pause / Finish; tap again to hide */
+function hideControls() {
+  while (controlsEl.firstChild) controlsEl.removeChild(controlsEl.firstChild);
+  if (play.hideTimer) { clearTimeout(play.hideTimer); play.hideTimer = null; }
+}
+
+function showControls() {
+  hideControls();
+  const p = mk("a-plane", {
+    width: 3.2, height: 0.9,
+    material: { color: theme().panel, shader: "flat", opacity: 0.92, transparent: true }
+  }, controlsEl);
+  addButton(p, play.paused ? "Resume" : "Pause", { x: -0.8, y: 0, w: 1.4, h: 0.6, wrap: 10, onClick: () => {
+    play.paused = !play.paused;
+    if (play.video) { play.paused ? play.video.pause() : play.video.play(); }
+    if (play.audio) { play.paused ? play.audio.pause() : play.audio.play(); }
+    showControls();
+  }});
+  addButton(p, "Finish", { x: 0.8, y: 0, w: 1.4, h: 0.6, secondary: true, wrap: 10, onClick: finishExperience });
+  placeInFront(controlsEl, 1.6, -0.35);
+  play.hideTimer = setTimeout(hideControls, (CONFIG.controlsAutoHideSeconds || 8) * 1000);
+}
+
+skyEl.addEventListener("click", () => {
+  if (!play.active || !pressAllowed()) return;
+  controlsEl.firstChild ? hideControls() : showControls();
+});
+
+/* ---------- 5) START ---------- */
+function startApp() {
+  const fadeMesh = fadeEl.getObject3D("mesh");
+  if (fadeMesh) fadeMesh.renderOrder = 999;   // always drawn last, on top
+  show("welcome");
+  // keep the menu in front of you when you put the headset on
+  sceneEl.addEventListener("enter-vr", () => setTimeout(() => {
+    if (!play.active) show(current.screen);
+  }, 700));
+  // When installed as a Quest app that launches straight into VR, this enters VR automatically.
+  if (new URLSearchParams(location.search).get("autostart") === "1") {
+    try { sceneEl.enterVR(); } catch (e) {}
+  }
+}
+if (sceneEl.hasLoaded) startApp(); else sceneEl.addEventListener("loaded", startApp);
+</script>
+</body>
+</html>
