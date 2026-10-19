@@ -15,11 +15,11 @@
 <a-scene id="scene" background="color: #0c1f1c" renderer="antialias: true" loading-screen="enabled: false">
 
   <!-- The 360 photo/video is shown on this big sphere around the viewer -->
-  <a-sky id="sky" radius="50" visible="false" color="#0c1f1c"></a-sky>
+  <a-sky id="sky" radius="50" visible="false"></a-sky>
 
   <!-- Viewer (camera) -->
   <a-entity id="rig">
-    <a-entity id="cam" camera look-controls position="0 1.6 0">
+    <a-entity id="cam" camera="near: 0.05; far: 200" look-controls position="0 1.6 0">
       <!-- invisible black ball used for smooth fades to black -->
       <a-sphere id="fade" radius="0.4" segments-width="12" segments-height="8"
                 visible="false"
@@ -35,6 +35,7 @@
   <a-entity cursor="rayOrigin: xrselect; fuse: false" raycaster="objects: .clickable; far: 100"></a-entity>
 
   <!-- All menus are built into this entity by the script below -->
+  <a-entity id="stereo"></a-entity>
   <a-entity id="ui"></a-entity>
   <a-entity id="controls"></a-entity>
 </a-scene>
@@ -48,29 +49,44 @@
 const EXPERIENCES = window.EXPERIENCES || [];
 const CONFIG = window.APP_CONFIG || {};
 
-/* ---------- 1) LOOK & FEEL: change colors and sizes here ---------- */
+/* ---------- 1) LOOK & FEEL: change colors, fonts and sizes here ---------- */
+const FONTS = {
+  title: "fonts/Literata-SemiBold.json",   // warm serif, used for titles
+  body:  "fonts/Atkinson-Regular.json",    // Atkinson Hyperlegible: designed for low vision
+  bold:  "fonts/Atkinson-Bold.json"        // same family, used on buttons
+};
 const THEMES = {
   normal: {
-    panel: "#12302b",      // deep spruce panel behind the words
-    text: "#f1f5ee",       // mist white
-    muted: "#c3d3c8",
-    button: "#bcdc8c",     // sunlit moss
-    buttonText: "#10231f",
-    buttonHover: "#d8f0b4",
-    secondary: "#2f5650",
-    secondaryText: "#f1f5ee",
-    secondaryHover: "#41736a"
+    panel: "#1a2b25",        // deep pine panel
+    panelEdge: "#4a695c",    // soft edge line around panels
+    text: "#f6f1e5",         // warm ivory
+    muted: "#c9d4c8",
+    button: "#efe3c2",       // birch bark: main buttons
+    buttonLip: "#b3a272",    // the little "lip" under main buttons
+    buttonText: "#14241e",
+    buttonHover: "#fff4d2",
+    secondary: "#2a4237",    // quieter buttons
+    secondaryEdge: "#d3ddd0",
+    secondaryText: "#f6f1e5",
+    secondaryHover: "#385a4c",
+    focus: "#f2c867",        // glow ring shown around the button you are pointing at
+    shadow: "#000000"
   },
   contrast: {
     panel: "#000000",
+    panelEdge: "#ffffff",
     text: "#ffffff",
     muted: "#ffffff",
     button: "#ffe14d",
+    buttonLip: "#8f7a00",
     buttonText: "#000000",
-    buttonHover: "#fff1a0",
-    secondary: "#ffffff",
-    secondaryText: "#000000",
-    secondaryHover: "#dddddd"
+    buttonHover: "#fff4a8",
+    secondary: "#000000",
+    secondaryEdge: "#ffffff",
+    secondaryText: "#ffffff",
+    secondaryHover: "#2b2b2b",
+    focus: "#4de1ff",
+    shadow: "#000000"
   }
 };
 const TEXT_SIZES = [
@@ -78,7 +94,7 @@ const TEXT_SIZES = [
   { label: "Large", scale: 1.2 },
   { label: "Extra large", scale: 1.4 }
 ];
-const PANEL_W = 4.0, PANEL_H = 2.6;     // size of the menu panel (meters)
+const PANEL_W = 4.3, PANEL_H = 3.2;     // size of the menu panel (meters)
 const MENU_DISTANCE = 2.2;               // how far in front of you menus appear
 
 const settings = { sizeIndex: 0, highContrast: false, readAloud: false };
@@ -92,6 +108,7 @@ const controlsEl = document.getElementById("controls");
 const skyEl = document.getElementById("sky");
 const camEl = document.getElementById("cam");
 const fadeEl = document.getElementById("fade");
+const stereoEl = document.getElementById("stereo");
 
 // create an A-Frame element and attach it
 function mk(tag, attrs, parent) {
@@ -110,55 +127,111 @@ function pressAllowed() {
   return true;
 }
 
+/* Rounded shapes. Everything on screen (panels, buttons, photo frames) is a stack of
+   these, layered a few millimeters apart to give soft shadows and a little depth. */
+function roundedShape(w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  const x = -w / 2, y = -h / 2, s = new THREE.Shape();
+  s.moveTo(x + r, y);
+  s.lineTo(x + w - r, y);
+  s.absarc(x + w - r, y + r, r, -Math.PI / 2, 0, false);
+  s.lineTo(x + w, y + h - r);
+  s.absarc(x + w - r, y + h - r, r, 0, Math.PI / 2, false);
+  s.lineTo(x + r, y + h);
+  s.absarc(x + r, y + h - r, r, Math.PI / 2, Math.PI, false);
+  s.lineTo(x, y + r);
+  s.absarc(x + r, y + r, r, Math.PI, Math.PI * 1.5, false);
+  return s;
+}
+
+function addShape(entity, name, w, h, r, color, opacity, x, y, z, fitUV) {
+  const geo = new THREE.ShapeGeometry(roundedShape(w, h, r), 10);
+  if (fitUV) {                                   // so a picture fits the shape exactly
+    const uv = geo.attributes.uv, pos = geo.attributes.position;
+    for (let i = 0; i < uv.count; i++) uv.setXY(i, pos.getX(i) / w + 0.5, pos.getY(i) / h + 0.5);
+  }
+  const mat = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(color), transparent: opacity < 1, opacity: opacity, toneMapped: false
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(x || 0, y || 0, z || 0);
+  mesh.userData.mine = true;
+  entity.setObject3D(name, mesh);
+  return mesh;
+}
+
+// free the memory used by shapes when a screen is removed
+function disposeShapes(root) {
+  root.object3D.traverse(o => {
+    if (o.userData && o.userData.mine) {
+      o.geometry.dispose();
+      if (o.material.map) o.material.map.dispose();
+      o.material.dispose();
+    }
+  });
+}
+
 function addText(parent, value, o) {
   o = o || {};
   return mk("a-entity", {
-    position: (o.x || 0) + " " + (o.y || 0) + " 0.02",
+    position: (o.x || 0) + " " + (o.y || 0) + " 0.03",
     text: {
       value: value,
+      font: FONTS[o.font || "body"],
       align: o.align || "center",
       anchor: "center",
       baseline: o.baseline || "center",
       color: o.color || theme().text,
       width: o.width || 3.3,
-      wrapCount: Math.round((o.wrap || 34) / (o.noScale ? 1 : scale()))
+      wrapCount: Math.round((o.wrap || 34) / (o.noScale ? 1 : (o.maxScale ? Math.min(scale(), o.maxScale) : scale())))
     }
   }, parent);
 }
 
 function addButton(parent, label, o) {
   const t = theme();
-  const w = o.w || 1.6, h = o.h || 0.46;
-  const bg = o.secondary ? t.secondary : t.button;
-  const hover = o.secondary ? t.secondaryHover : t.buttonHover;
-  const fg = o.secondary ? t.secondaryText : t.buttonText;
-  const btn = mk("a-plane", {
-    class: "clickable",
-    position: (o.x || 0) + " " + (o.y || 0) + " 0.04",
-    width: w, height: h,
-    material: { color: bg, shader: "flat" }
+  const w = o.w || 1.6, h = o.h || 0.5;
+  const r = Math.min(h * 0.3, 0.16);
+  const primary = !o.secondary;
+  const btn = mk("a-entity", {
+    class: "clickable", position: (o.x || 0) + " " + (o.y || 0) + " 0.03"
   }, parent);
-  mk("a-entity", {
-    position: "0 0 0.01",
-    text: {
-      value: label, align: "center", anchor: "center", baseline: "center",
-      color: fg, width: w * 0.9,
-      wrapCount: Math.round((o.wrap || 18) / Math.min(scale(), 1.25))
-    }
-  }, btn);
-  btn.addEventListener("mouseenter", () => btn.setAttribute("material", "color", hover));
-  btn.addEventListener("mouseleave", () => btn.setAttribute("material", "color", bg));
+  addShape(btn, "shadow", w + 0.05, h + 0.05, r + 0.03, t.shadow, 0.32, 0, -0.03, -0.012);
+  const ring = addShape(btn, "ring", w + 0.11, h + 0.11, r + 0.055, t.focus, 1, 0, 0, -0.006);
+  ring.visible = false;
+  if (primary) addShape(btn, "lip", w, h, r, t.buttonLip, 1, 0, -0.02, 0.002);
+  else addShape(btn, "edge", w + 0.035, h + 0.035, r + 0.018, t.secondaryEdge, 1, 0, 0, 0.002);
+  const base = primary ? t.button : t.secondary;
+  const over = primary ? t.buttonHover : t.secondaryHover;
+  const fill = addShape(btn, "fill", w, h, r, base, 1, 0, 0, 0.008);
+  // text on buttons grows with the text-size setting, but never more than 1.25x so it still fits
+  addText(btn, label, {
+    font: "bold", width: w * 0.9, wrap: o.wrap || 18, maxScale: 1.25,
+    color: primary ? t.buttonText : t.secondaryText
+  }).object3D.position.set(0, 0, 0.02);
+  btn.addEventListener("mouseenter", () => {
+    fill.material.color.set(over); ring.visible = true; btn.object3D.scale.set(1.04, 1.04, 1);
+  });
+  btn.addEventListener("mouseleave", () => {
+    fill.material.color.set(base); ring.visible = false; btn.object3D.scale.set(1, 1, 1);
+  });
   btn.addEventListener("click", () => { if (pressAllowed()) o.onClick(); });
   return btn;
 }
 
-// a panel with a title; returns the panel so screens can add things to it
+// a rounded panel with soft shadow; returns it so screens can add things to it
 function addPanel(opts) {
   opts = opts || {};
-  const panel = mk("a-plane", {
-    width: PANEL_W, height: PANEL_H,
-    material: { color: theme().panel, shader: "flat", opacity: 0.96, transparent: true }
-  }, uiEl);
+  const t = theme();
+  const W = opts.w || PANEL_W, H = opts.h || PANEL_H, r = 0.22;
+  const panel = mk("a-entity", {}, opts.parent || uiEl);
+  addShape(panel, "shadow2", W + 0.28, H + 0.28, r + 0.12, t.shadow, 0.16, 0, -0.07, -0.03);
+  addShape(panel, "shadow1", W + 0.1, H + 0.1, r + 0.05, t.shadow, 0.3, 0, -0.04, -0.015);
+  addShape(panel, "edge", W + 0.04, H + 0.04, r + 0.02, t.panelEdge, 1, 0, 0, -0.004);
+  addShape(panel, "fill", W, H, r, t.panel, 1, 0, 0, 0);
+  if (CONFIG.copyright && !opts.noFooter) {
+    addText(panel, CONFIG.copyright, { y: -H / 2 + 0.1, wrap: 80, width: 3.7, color: t.muted, noScale: true });
+  }
   if (opts.tapAnywhere) {
     panel.classList.add("clickable");
     panel.addEventListener("click", () => { if (pressAllowed()) opts.tapAnywhere(); });
@@ -205,9 +278,10 @@ function fadeTo(opacity, ms) {
 }
 
 /* ---------- 3) SCREENS ---------- */
-let current = { screen: "welcome", index: 0, exp: null, practiced: false };
+let current = { screen: "welcome", index: 0, exp: null };
 
 function clearUI() {
+  disposeShapes(uiEl);
   while (uiEl.firstChild) uiEl.removeChild(uiEl.firstChild);
 }
 
@@ -225,27 +299,28 @@ const SCREENS = {
   /* Welcome + comfort settings */
   welcome() {
     const p = addPanel();
-    addText(p, CONFIG.appTitle || "Welcome", { y: 0.88, wrap: 24, width: 3.5 });
-    addText(p, CONFIG.welcomeLine || "", { y: 0.38, wrap: 40, width: 3.2, color: theme().muted });
-    const row = -0.15;
+    addText(p, CONFIG.appTitle || "Welcome", { y: 1.05, wrap: 24, width: 3.8, font: "title" });
+    addText(p, CONFIG.welcomeLine || "", { y: 0.2, wrap: 40, width: 3.3, color: theme().muted });
+    const row = -0.4;
     addButton(p, "Text size: " + TEXT_SIZES[settings.sizeIndex].label, {
-      x: -1.25, y: row, w: 1.2, h: 0.5, secondary: true, wrap: 12,
+      x: -1.32, y: row, w: 1.24, h: 0.62, secondary: true, wrap: 12,
       onClick: () => { settings.sizeIndex = (settings.sizeIndex + 1) % TEXT_SIZES.length; show("welcome"); }
     });
     addButton(p, "High contrast: " + (settings.highContrast ? "On" : "Off"), {
-      x: 0, y: row, w: 1.2, h: 0.5, secondary: true, wrap: 12,
+      x: 0, y: row, w: 1.24, h: 0.62, secondary: true, wrap: 12,
       onClick: () => { settings.highContrast = !settings.highContrast; show("welcome"); }
     });
     addButton(p, "Read aloud: " + (settings.readAloud ? "On" : "Off"), {
-      x: 1.25, y: row, w: 1.2, h: 0.5, secondary: true, wrap: 12,
+      x: 1.32, y: row, w: 1.24, h: 0.62, secondary: true, wrap: 12,
       onClick: () => { settings.readAloud = !settings.readAloud; show("welcome"); }
     });
-    addButton(p, "Start", { y: -0.95, w: 2.0, h: 0.55, wrap: 12, onClick: () => show("select") });
+    addButton(p, "Start", { y: -1.1, w: 2.2, h: 0.62, wrap: 12, onClick: () => show("select") });
     speak((CONFIG.appTitle || "") + ". " + (CONFIG.welcomeLine || "") + " Select Start when you are ready.");
   },
 
   /* Carousel: one experience at a time, big Previous / Next */
   select() {
+    const t = theme();
     const p = addPanel();
     const n = EXPERIENCES.length;
     if (!n) {
@@ -253,27 +328,32 @@ const SCREENS = {
       return;
     }
     const exp = EXPERIENCES[current.index];
-    addText(p, "Please select your experience", { y: 1.05, wrap: 40, width: 3.3, color: theme().muted });
+    addText(p, "Please select your experience", { y: 1.27, wrap: 38, width: 3.4, color: t.muted });
 
-    // picture (tap it to choose)
-    const thumb = mk("a-plane", {
-      class: "clickable", position: "0 0.35 0.04", width: 1.6, height: 0.9,
-      material: { color: "#2f5650", shader: "flat" }
-    }, p);
-    if (exp.thumbnail) thumb.setAttribute("material", { src: exp.thumbnail, color: "#ffffff", shader: "flat" });
+    // the picture, framed like a photograph (tap it to choose)
+    const thumb = mk("a-entity", { class: "clickable", position: "0 0.5 0.03" }, p);
+    addShape(thumb, "shadow", 1.78, 1.08, 0.12, t.shadow, 0.32, 0, -0.035, -0.012);
+    addShape(thumb, "frame", 1.7, 1.0, 0.1, t.text, 1, 0, 0, 0);
+    const photo = addShape(thumb, "photo", 1.6, 0.9, 0.07, t.secondary, 1, 0, 0, 0.006, true);
+    if (exp.thumbnail) {
+      new THREE.TextureLoader().load(exp.thumbnail, tex => {
+        if (THREE.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
+        photo.material.map = tex; photo.material.color.set("#ffffff"); photo.material.needsUpdate = true;
+      });
+    }
     thumb.addEventListener("click", () => { if (pressAllowed()) show("info", { exp: exp }); });
 
     addButton(p, "Previous", {
-      x: -1.45, y: 0.35, w: 0.9, h: 0.9, secondary: true, wrap: 9,
+      x: -1.55, y: 0.5, w: 0.95, h: 0.95, secondary: true, wrap: 9,
       onClick: () => { current.index = (current.index - 1 + n) % n; show("select"); }
     });
     addButton(p, "Next", {
-      x: 1.45, y: 0.35, w: 0.9, h: 0.9, secondary: true, wrap: 9,
+      x: 1.55, y: 0.5, w: 0.95, h: 0.95, secondary: true, wrap: 9,
       onClick: () => { current.index = (current.index + 1) % n; show("select"); }
     });
-    addText(p, exp.title, { y: -0.3, wrap: 26, width: 3.4 });
-    addText(p, (current.index + 1) + " of " + n, { y: -0.62, wrap: 50, color: theme().muted, noScale: true });
-    addButton(p, "Choose this experience", { y: -1.02, w: 2.8, h: 0.46, wrap: 24,
+    addText(p, exp.title, { y: -0.3, wrap: 24, width: 3.5, font: "title" });
+    addText(p, (current.index + 1) + " of " + n, { y: -0.64, wrap: 50, color: t.muted, noScale: true });
+    addButton(p, "Choose this experience", { y: -1.07, w: 3.0, h: 0.52, wrap: 24,
       onClick: () => show("info", { exp: exp }) });
     speak("Please select your experience. " + exp.title + ". " + (current.index + 1) + " of " + n);
   },
@@ -282,74 +362,45 @@ const SCREENS = {
   info() {
     const exp = current.exp;
     const p = addPanel({ tapAnywhere: () => show("safety") });
-    addText(p, exp.title, { y: 0.75, wrap: 22, width: 3.5 });
-    addText(p, exp.description || "", { y: 0.05, wrap: 38, width: 3.2 });
-    addText(p, "Tap anywhere to continue", { y: -0.75, wrap: 36, color: theme().muted });
-    addButton(p, "Back to menu", { x: -1.45, y: -1.0, w: 1.0, h: 0.38, secondary: true, wrap: 14,
+    addText(p, exp.title, { y: 0.98, wrap: 20, width: 3.6, font: "title" });
+    addText(p, exp.description || "", { y: 0.3, wrap: 38, width: 3.3 });
+    if (CONFIG.pauseHint) addText(p, CONFIG.pauseHint, { y: -0.38, wrap: 44, width: 3.4, color: theme().muted });
+    addText(p, "Tap anywhere to continue", { y: -0.8, wrap: 34, font: "bold" });
+    addButton(p, "Back to menu", { x: -1.4, y: -1.24, w: 1.2, h: 0.38, secondary: true, wrap: 14,
       onClick: () => show("select") });
-    speak(exp.title + ". " + (exp.description || "") + " Tap anywhere to continue.");
+    speak(exp.title + ". " + (exp.description || "") + " " + (CONFIG.pauseHint || "") + " Tap anywhere to continue.");
   },
 
   /* Safety check */
   safety() {
     const exp = current.exp;
     const p = addPanel();
-    addText(p, CONFIG.safetyIntro || "", { y: 0.98, wrap: 44, width: 3.5 });
+    addText(p, CONFIG.safetyIntro || "", { y: 1.12, wrap: 42, width: 3.6 });
     let list = (CONFIG.safetyConditions || []).map(c => "\u2022 " + c).join("\n");
     if (exp.safetyNote) list += "\n\n" + exp.safetyNote;
-    addText(p, list, { y: 0.25, wrap: 46, width: 3.3, align: "left" });
-    addText(p, CONFIG.safetyQuestion || "", { y: -0.58, wrap: 40 });
-    addButton(p, "No, continue", { x: -1.0, y: -1.0, w: 1.8, h: 0.5, wrap: 14, onClick: () => show("firsttime") });
-    addButton(p, "Yes, go back", { x: 1.0, y: -1.0, w: 1.8, h: 0.5, secondary: true, wrap: 14, onClick: () => show("select") });
+    addText(p, list, { y: 0.28, wrap: 34, width: 3.2, align: "left" });
+    addText(p, CONFIG.safetyQuestion || "", { y: -0.52, wrap: 36, font: "bold" });
+    addButton(p, "No, continue", { x: -1.05, y: -1.1, w: 1.9, h: 0.55, wrap: 14, onClick: () => startExperience(current.exp) });
+    addButton(p, "Yes, go back", { x: 1.05, y: -1.1, w: 1.9, h: 0.55, secondary: true, wrap: 14, onClick: () => show("select") });
     speak((CONFIG.safetyIntro || "") + " " + (CONFIG.safetyConditions || []).join(". ") + ". " + (CONFIG.safetyQuestion || ""));
-  },
-
-  /* First time? */
-  firsttime() {
-    const p = addPanel();
-    addText(p, "Is this your first time trying this experience?", { y: 0.5, wrap: 26, width: 3.4 });
-    addButton(p, "Yes", { x: -1.0, y: -0.5, w: 1.6, h: 0.65, wrap: 8,
-      onClick: () => show("tutorial", { practiced: false }) });
-    addButton(p, "No", { x: 1.0, y: -0.5, w: 1.6, h: 0.65, secondary: true, wrap: 8,
-      onClick: () => startExperience(current.exp) });
-    speak("Is this your first time trying this experience?");
-  },
-
-  /* Quick practice with the selecting action */
-  tutorial() {
-    const p = addPanel();
-    addText(p, "Quick practice", { y: 0.95, wrap: 24, width: 3.5 });
-    if (!current.practiced) {
-      addText(p, "To choose something, point at it and press the trigger, or pinch your fingers. Try it now.", { y: 0.3, wrap: 40, width: 3.2 });
-      addButton(p, "Try me", { y: -0.55, w: 1.8, h: 0.6, wrap: 10,
-        onClick: () => { current.practiced = true; show("tutorial"); } });
-      addButton(p, "Skip practice", { y: -1.08, w: 1.4, h: 0.38, secondary: true, wrap: 14,
-        onClick: () => startExperience(current.exp) });
-      speak("To choose something, point at it and press the trigger, or pinch your fingers. Try it now.");
-    } else {
-      addText(p, "Wonderful, that is all you need. Whenever you want, tap the scene to pause or finish.", { y: 0.3, wrap: 40, width: 3.2 });
-      addButton(p, "Begin experience", { y: -0.7, w: 2.4, h: 0.6, wrap: 20,
-        onClick: () => startExperience(current.exp) });
-      speak("Wonderful, that is all you need. Whenever you want, tap the scene to pause or finish.");
-    }
   },
 
   /* Exit screen */
   exit() {
     const p = addPanel();
-    addText(p, "Your experience has ended!", { y: 0.95, wrap: 26, width: 3.5 });
-    addButton(p, "Exit the app", { y: 0.3, w: 3.2, h: 0.5, wrap: 28, onClick: exitApp });
-    addButton(p, "Return to experience selection", { y: -0.35, w: 3.2, h: 0.5, secondary: true, wrap: 30,
+    addText(p, "Your experience has ended!", { y: 1.12, wrap: 28, width: 3.8, font: "title" });
+    addButton(p, "Exit the app", { y: 0.3, w: 3.4, h: 0.56, wrap: 28, onClick: exitApp });
+    addButton(p, "Return to experience selection", { y: -0.42, w: 3.4, h: 0.56, secondary: true, wrap: 30,
       onClick: () => show("select") });
-    addButton(p, "Experience this again", { y: -1.0, w: 3.2, h: 0.5, secondary: true, wrap: 28,
+    addButton(p, "Experience this again", { y: -1.14, w: 3.4, h: 0.56, secondary: true, wrap: 28,
       onClick: () => startExperience(current.exp) });
     speak("Your experience has ended. You can exit the app, return to the experience selection, or experience this again.");
   },
 
   goodbye() {
     const p = addPanel();
-    addText(p, CONFIG.goodbye || "Thank you for visiting.", { y: 0.1, wrap: 30, width: 3.4 });
-    addButton(p, "Back to start", { y: -0.8, w: 1.8, h: 0.5, secondary: true, wrap: 14, onClick: () => show("welcome") });
+    addText(p, CONFIG.goodbye || "Thank you for visiting.", { y: 0.25, wrap: 28, width: 3.6, font: "title" });
+    addButton(p, "Back to start", { y: -0.85, w: 1.9, h: 0.55, secondary: true, wrap: 14, onClick: () => show("welcome") });
     speak(CONFIG.goodbye || "");
   }
 };
@@ -367,6 +418,61 @@ function exitApp() {
 /* ---------- 4) PLAYING AN EXPERIENCE ---------- */
 let play = { active: false, paused: false, elapsed: 0, timer: null, video: null, audio: null, hideTimer: null };
 
+/* ----- Stereoscopic (3D) support -----
+   A stereo file holds two pictures in one: left eye + right eye.
+   "top-bottom": left eye on top, right eye on the bottom.
+   "side-by-side": left eye on the left, right eye on the right.
+   Each eye gets its own sphere; three.js layers send sphere 1 to the left eye only
+   and sphere 2 to the right eye only. */
+let stereoParts = null;
+
+function eyeGeometry(layout, eye) {
+  const g = new THREE.SphereGeometry(50, 64, 32);
+  g.scale(-1, 1, 1);                       // so we see the inside of the sphere
+  const uv = g.attributes.uv;
+  for (let i = 0; i < uv.count; i++) {
+    let u = uv.getX(i), v = uv.getY(i);
+    if (layout === "side-by-side") u = u * 0.5 + (eye === 0 ? 0 : 0.5);
+    else v = v * 0.5 + (eye === 0 ? 0.5 : 0);
+    uv.setXY(i, u, v);
+  }
+  uv.needsUpdate = true;
+  return g;
+}
+
+function setupStereo(exp, texture) {
+  if (THREE.SRGBColorSpace) texture.colorSpace = THREE.SRGBColorSpace;
+  const layout = exp.stereo === "side-by-side" ? "side-by-side" : "top-bottom";
+  const swap = !!exp.swapEyes;
+  const makeEye = (eye, layer) => {
+    const mesh = new THREE.Mesh(
+      eyeGeometry(layout, swap ? 1 - eye : eye),
+      new THREE.MeshBasicMaterial({ map: texture, toneMapped: false })
+    );
+    if (layer !== null) mesh.layers.set(layer);
+    return mesh;
+  };
+  const left = makeEye(0, 1), right = makeEye(1, 2);
+  const preview = makeEye(0, null);        // flat laptop preview (left-eye picture only)
+  preview.visible = !(sceneEl.renderer && sceneEl.renderer.xr && sceneEl.renderer.xr.isPresenting);
+  stereoEl.object3D.add(left, right, preview);
+  stereoParts = { meshes: [left, right, preview], preview: preview, texture: texture };
+}
+
+function clearStereo() {
+  if (!stereoParts) return;
+  stereoParts.meshes.forEach(m => {
+    stereoEl.object3D.remove(m);
+    m.geometry.dispose();
+    m.material.dispose();
+  });
+  stereoParts.texture.dispose();
+  stereoParts = null;
+}
+// the laptop preview mesh must be hidden inside the headset (each eye has its own sphere)
+sceneEl.addEventListener("enter-vr", () => { if (stereoParts) stereoParts.preview.visible = false; });
+sceneEl.addEventListener("exit-vr",  () => { if (stereoParts) stereoParts.preview.visible = true; });
+
 async function startExperience(exp) {
   current.exp = exp;
   speak("");
@@ -375,8 +481,12 @@ async function startExperience(exp) {
   hideControls();
 
   play.active = true; play.paused = false; play.elapsed = 0;
-  skyEl.setAttribute("visible", true);
   skyEl.classList.add("clickable");
+  const isStereo = exp.stereo === "top-bottom" || exp.stereo === "side-by-side";
+
+  // regular (mono) 360 = visible sky sphere; stereo = invisible sphere that still catches taps
+  const monoLook = { shader: "flat", side: "back", color: "#ffffff", opacity: 1, transparent: false, depthWrite: true };
+  const tapOnlyLook = { shader: "flat", side: "back", color: "#000000", opacity: 0, transparent: true, depthWrite: false };
 
   if (exp.type === "video") {
     const v = document.createElement("video");
@@ -390,10 +500,23 @@ async function startExperience(exp) {
     document.body.appendChild(v);
     play.video = v;
     v.addEventListener("ended", finishExperience);
-    skyEl.setAttribute("material", "src", "#expVideo");
+    if (isStereo) {
+      skyEl.setAttribute("material", tapOnlyLook);
+      setupStereo(exp, new THREE.VideoTexture(v));
+    } else {
+      skyEl.setAttribute("material", Object.assign({}, monoLook, { src: "#expVideo" }));
+    }
     try { await v.play(); } catch (e) { console.warn("Video could not start:", e); }
   } else {
-    skyEl.setAttribute("material", "src", exp.src);
+    if (isStereo) {
+      skyEl.setAttribute("material", tapOnlyLook);
+      try {
+        const tex = await new Promise((res, rej) => new THREE.TextureLoader().load(exp.src, res, undefined, rej));
+        setupStereo(exp, tex);
+      } catch (e) { console.warn("Stereo picture could not load:", e); }
+    } else {
+      skyEl.setAttribute("material", Object.assign({}, monoLook, { src: exp.src }));
+    }
     if (exp.audio) {
       play.audio = new Audio(exp.audio);
       play.audio.loop = true;
@@ -407,6 +530,7 @@ async function startExperience(exp) {
       }
     }, 500);
   }
+  skyEl.setAttribute("visible", true);
   await fadeTo(0, 900);
 }
 
@@ -414,6 +538,7 @@ function stopMedia() {
   if (play.timer) { clearInterval(play.timer); play.timer = null; }
   if (play.video) { play.video.pause(); play.video.remove(); play.video = null; }
   if (play.audio) { play.audio.pause(); play.audio = null; }
+  clearStereo();
 }
 
 async function finishExperience() {
@@ -430,23 +555,21 @@ async function finishExperience() {
 
 /* Tap the scene to show Pause / Finish; tap again to hide */
 function hideControls() {
+  disposeShapes(controlsEl);
   while (controlsEl.firstChild) controlsEl.removeChild(controlsEl.firstChild);
   if (play.hideTimer) { clearTimeout(play.hideTimer); play.hideTimer = null; }
 }
 
 function showControls() {
   hideControls();
-  const p = mk("a-plane", {
-    width: 3.2, height: 0.9,
-    material: { color: theme().panel, shader: "flat", opacity: 0.92, transparent: true }
-  }, controlsEl);
-  addButton(p, play.paused ? "Resume" : "Pause", { x: -0.8, y: 0, w: 1.4, h: 0.6, wrap: 10, onClick: () => {
+  const p = addPanel({ parent: controlsEl, w: 3.3, h: 1.0, noFooter: true });
+  addButton(p, play.paused ? "Resume" : "Pause", { x: -0.82, y: 0, w: 1.45, h: 0.62, wrap: 10, onClick: () => {
     play.paused = !play.paused;
     if (play.video) { play.paused ? play.video.pause() : play.video.play(); }
     if (play.audio) { play.paused ? play.audio.pause() : play.audio.play(); }
     showControls();
   }});
-  addButton(p, "Finish", { x: 0.8, y: 0, w: 1.4, h: 0.6, secondary: true, wrap: 10, onClick: finishExperience });
+  addButton(p, "Finish", { x: 0.82, y: 0, w: 1.45, h: 0.62, secondary: true, wrap: 10, onClick: finishExperience });
   placeInFront(controlsEl, 1.6, -0.35);
   play.hideTimer = setTimeout(hideControls, (CONFIG.controlsAutoHideSeconds || 8) * 1000);
 }

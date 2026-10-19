@@ -18,6 +18,11 @@
                 (optional - leave it out and a plain colored card is shown)
    duration     photos only: how many seconds to stay in the scene
    audio        photos only (optional): a sound file to play, e.g. "assets/river.mp3"
+   stereo       optional, for 3D (stereoscopic) files: "top-bottom" or "side-by-side"
+                Leave it out for regular (monoscopic) 360 files.
+                top-bottom  = left-eye picture on top, right-eye picture below
+                side-by-side = left-eye picture on the left, right-eye on the right
+   swapEyes     optional, stereo only: set to true if depth looks "inside out"
    safetyNote   optional extra line shown on the safety screen
                 (e.g. "This scene includes a view over a cliff edge.")
    ========================================================================== */
@@ -49,6 +54,7 @@ window.EXPERIENCES = [
     src: "assets/placeholder-meadow.jpg",
     thumbnail: "assets/thumb-meadow.jpg",
     duration: 90
+    // Example of a 3D (stereoscopic) picture: stereo: "top-bottom",  and  src: "assets/placeholder-stereo-test.jpg"
     // Example of a video experience (remove the // marks and fill in your file names):
     // type: "video",
     // src: "assets/my-video.mp4",
@@ -61,15 +67,19 @@ window.EXPERIENCES = [
    ========================================================================== */
 window.APP_CONFIG = {
   appTitle: "Welcome to Nature Immersion",
+
+  // Shown in small print at the bottom of every menu screen
+  copyright: "© 2026 Táhila Moss. For individual use only.",
   welcomeLine: "Take a moment to set things up so you are comfortable.",
 
   safetyIntro: "This experience may not be suitable for anyone with the following:",
   safetyConditions: [
-    "Dizziness, vertigo, or a tendency toward motion sickness",
-    "A fear of heights",
-    "A history of seizures",
-    "Feeling unwell today"
+    "Dizziness or vertigo",
+    "A history of seizures"
   ],
+  // Shown on the screen just before an experience starts
+  pauseHint: "While you are in the experience, tap anywhere to pause or finish.",
+
   safetyQuestion: "Does any of this apply to you?",
 
   // How long the Pause / Finish buttons stay on screen before hiding
